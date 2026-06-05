@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <title>1vs1 3D - Pro Battleground</title>
+    <style>
+        body { margin: 0; overflow: hidden; font-family: 'Segoe UI', sans-serif; background: #111; }
+        #ui { position: absolute; top: 20px; left: 20px; color: white; background: rgba(0,0,0,0.75); padding: 15px; border-radius: 8px; border: 1px solid #333; }
+        
+        /* Sistema de Miras Dinámicas */
+        #crosshair { 
+            position: absolute; top: 50%; left: 50%; 
+            transform: translate(-50%, -50%); 
+            transition: all 0.2s ease;
+            pointer-events: none;
+        }
+        /* Estilo Mira Phantom (Punto preciso) */
+        .crosshair-phantom { width: 6px; height: 6px; background: #00ffcc; border-radius: 50%; box-shadow: 0 0 8px #00ffcc; }
+        /* Estilo Mira Escopeta (Círculo amplio) */
+        .crosshair-escopeta { width: 30px; height: 30px; border: 2px solid #ff5500; border-radius: 50%; box-shadow: inset 0 0 5px #ff5500; }
+    </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
+    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+</head>
+<body>
+
+    <div id="ui">
+        <h2>Sala 1vs1</h2>
+        <p>Arma actual: <b id="weapon" style="color: #00ffcc;">Phantom</b></p>
+        <p><span style="background:#333; padding:2px 6px; border-radius:4px;">Q</span> Cambiar Arma</p>
+        <p><span style="background:#333; padding:2px 6px; border-radius:4px;">Click</span> Disparar</p>
+    </div>
+    <div id="crosshair" class="crosshair-phantom"></div>
+
+    <script>
+        // RECUERDA: Coloca aquí tu URL de Render cuando la tengas, ej: io("https://servidor.onrender.com")
+        const socket = io(); 
+
+        // 1. CONFIGURACIÓN GRÁFICA AVANZADA
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x0a0a12);
+        scene.fog = new THREE.FogExp2(0x0a0a12, 0.015);
+
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.toneMapping = THREE.ACESFilmicToneMapping; // Gráficos más cinematográficos
+        renderer.toneMappingExposure = 1.2;
+        renderer.shadowMap.enabled = true;
+        document.body.appendChild(renderer.domElement);
+
+        // Iluminación mejorada
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+        scene.add(ambientLight);
+
+        const sunLight = new THREE.DirectionalLight(0xffeebb, 1.2);
+        sunLight.position.set(20, 40, 20);
+        sunLight.castShadow = true;
+        scene.add(sunLight);
+
+        // 2. CARGAR TU MAPA CUSTOM .GLB
+        const loader = new THREE.GLTFLoader();
+        loader.load('1v1camp.glb', (gltf) => {
+            const map = gltf.scene;
+            map.traverse((child) => {
+                if (child.isMesh) {
+                    child.receiveShadow = true;
+                    child.castShadow = true;
+                }
+            });
+            scene.add(map);
+            console.log("¡Tu mapa 1v1camp.glb se ha cargado con éxito!");
+        }, undefined, (error) => {
+            console.error("Asegúrate de subir el archivo '1v1camp.glb' al mismo sitio que este index.html", error);
+        });
+
+        // 3. JUGADORES Y LÓGICA
+        let miId = null;
+        let miArma = "Phantom";
+        const localPlayer = { x: Math.random() * 6 - 3, z: Math.random() * 6 - 3 };
+        const remotePlayers = {};
+
+        const keys = { w: false, a: false, s: false, d: false };
+        window.addEventListener('keydown', (e) => { 
+            if(keys[e.key.toLowerCase()] !== undefined) keys[e.key.toLowerCase()] = true;
+            
+            // Cambiar Arma con la tecla Q
+            if(e.key.toLowerCase() === 'q') {
+                miArma = (miArma === 'Phantom') ? 'Escopeta' : 'Phantom';
+                actualizarInterfazArma();
+                socket.emit('changeWeapon', miArma);
+            }
+        });
+        window.addEventListener('keyup', (e) => { if(keys[e.key.toLowerCase()] !== undefined) keys[e.key.toLowerCase()] = false; });
+
+        function actualizarInterfazArma() {
+            const txt = document.getElementById('weapon');
+            const cross = document.getElementById('crosshair');
+            txt.innerText = miArma;
+            if(miArma === 'Phantom') {
+                txt.style.color = "#00ffcc";
+                cross.className = "crosshair-phantom";
+            } else {
+                txt.style.color = "#ff5500";
+                cross.className = "crosshair-escopeta";
+            }
+        }
+
+        window.addEventListener('click', () => {
+            socket.emit('shoot');
+        });
+
+        // 4. CONEXIÓN RED
+        socket.on('initGame', (data) => {
+            miId = data.id;
+            miArma = data.allPlayers[miId].weapon;
+            actualizarInterfazArma();
+
+            Object.keys(data.allPlayers).forEach((id) => {
+                if (id !== miId && data.allPlayers[id].room === data.allPlayers[miId].room) {
+                    createRemotePlayer(id, data.allPlayers[id]);
+                }
+            });
+        });
+
+        socket.on('newPlayer', (data) => {
+            createRemotePlayer(data.id, data.player);
+        });
+
+        socket.on('playerMoved', (data) => {
+            if (remotePlayers[data.id]) {
+                remotePlayers[data.id].position.set(data.player.x, 1, data.player.z);
+            }
+        });
+
+        socket.on('enemyChangedWeapon', (data) => {
+            if (remotePlayers[data.id]) {
+                // Cambia el color del enemigo según su arma en tiempo real
+                remotePlayers[data.id].material.color.setHex(data.weapon === 'Phantom' ? 0x00ffcc : 0xff5500);
+            }
+        });
+
+        socket.on('enemyShot', (data) => {
+            alert(`¡El rival te disparó con una ${data.weapon}!`);
+        });
+
+        socket.on('playerDisconnected', (id) => {
+            if (remotePlayers[id]) {
+                scene.remove(remotePlayers[id]);
+                delete remotePlayers[id];
+            }
+        });
+
+        function createRemotePlayer(id, playerData) {
+            if(remotePlayers[id]) return;
+            const geometry = new THREE.CapsuleGeometry(0.5, 1.5, 4, 8); // Forma humana estilizada
+            const color = playerData.weapon === 'Phantom' ? 0x00ffcc : 0xff5500;
+            const material = new THREE.MeshStandardMaterial({ color: color, roughness: 0.3 });
+            const mesh = new THREE.Mesh(geometry, material);
+            mesh.position.set(playerData.x, 1, playerData.z);
+            mesh.castShadow = true;
+            scene.add(mesh);
+            remotePlayers[id] = mesh;
+        }
+
+        // 5. BUCLE RENDER
+        function animate() {
+            requestAnimationFrame(animate);
+
+            let moved = false;
+            const speed = 0.12;
+            if (keys.w) { localPlayer.z -= speed; moved = true; }
+            if (keys.s) { localPlayer.z += speed; moved = true; }
+            if (keys.a) { localPlayer.x -= speed; moved = true; }
+            if (keys.d) { localPlayer.x += speed; moved = true; }
+
+            camera.position.set(localPlayer.x, 2, localPlayer.z + 5);
+            camera.lookAt(localPlayer.x, 1, localPlayer.z - 5);
+
+            if (moved && miId) {
+                socket.emit('playerMovement', { x: localPlayer.x, z: localPlayer.z, rotation: 0 });
+            }
+
+            renderer.render(scene, camera);
+        }
+        animate();
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+    </script>
+</body>
+</html>
