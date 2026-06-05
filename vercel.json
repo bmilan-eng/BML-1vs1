@@ -1,0 +1,20 @@
+{
+  "version": 2,
+  "builds": [
+    {
+      "src": "index.html",
+      "use": "@vercel/static"
+    },
+    {
+      "src": "1v1camp.glb",
+      "use": "@vercel/static"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/1v1camp.glb",
+      "headers": { "Content-Type": "model/gltf-binary" },
+      "dest": "/1v1camp.glb"
+    }
+  ]
+}
