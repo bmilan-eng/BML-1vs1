@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <title>1vs1 3D - Pro Battleground (Diagnostic Mode)</title>
+    <style>
+        body { margin: 0; overflow: hidden; font-family: 'Segoe UI', sans-serif; background: #111; }
+        #ui { position: absolute; top: 20px; left: 20px; color: white; background: rgba(0,0,0,0.75); padding: 15px; border-radius: 8px; border: 1px solid #333; z-index: 10; }
+        #crosshair { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); transition: all 0.2s ease; pointer-events: none; }
+        .crosshair-phantom { width: 6px; height: 6px; background: #00ffcc; border-radius: 50%; box-shadow: 0 0 8px #00ffcc; }
+        .crosshair-escopeta { width: 30px; height: 30px; border: 2px solid #ff5500; border-radius: 50%; box-shadow: inset 0 0 5px #ff5500; }
+    </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
+    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+</head>
+<body>
+
+    <div id="ui">
+        <h2>Sala 1vs1</h2>
+        <p>Arma actual: <b id="weapon" style="color: #00ffcc;">Phantom</b></p>
+        <p><span style="background:#333; padding:2px 6px; border-radius:4px;">Q</span> Cambiar Arma</p>
+        <p><span style="background:#333; padding:2px 6px; border-radius:4px;">Click</span> Disparar</p>
+        <p id="map-status" style="color: yellow;">Buscando mapa 3D...</p>
+    </div>
+    <div id="crosshair" class="crosshair-phantom"></div>
+
+    <script>
+        const socket = io(); 
+
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x0a0a12);
+        scene.fog = new THREE.FogExp2(0x0a0a12, 0.015);
+
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.toneMapping = THREE.ACESFilmicToneMapping;
+        renderer.toneMappingExposure = 1.2;
+        renderer.shadowMap.enabled = true;
+        document.body.appendChild(renderer.domElement);
+
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+        scene.add(ambientLight);
+
+        const sunLight = new THREE.DirectionalLight(0xffeebb, 1.2);
+        sunLight.position.set(20, 40, 20);
+        sunLight.castShadow = true;
+        scene.add(sunLight);
+
+        // --- DETECTOR DE ERRORES DEL GLB ---
+        const loader = new THREE.GLTFLoader();
+        
+        // Intentamos cargar usando una ruta absoluta segura para Vercel
+        loader.load('./1v1camp.glb', 
+            (gltf) => {
+                const map = gltf.scene;
+                map.traverse((child) => {
+                    if (child.isMesh) {
+                        child.receiveShadow = true;
+                        child.castShadow = true;
+                    }
+                });
+                scene.add(map);
+                document.getElementById('map-status').innerText = "¡Mapa cargado con éxito!";
+                document.getElementById('map-status').style.color = "#00ff00";
+            }, 
+            (xhr) => {
+                // Monitorea el porcentaje de descarga del mapa
+                if(xhr.total > 0) {
+                    const percent = Math.round((xhr.loaded / xhr.total) * 100);
+                    document.getElementById('map-status').innerText = `Cargando mapa: ${percent}%`;
+                }
+            }, 
+            (error) => {
+                // Captura el error exacto y lo muestra en una ventana emergente en el juego
+                document.getElementById('map-status').innerText = "Error al cargar mapa.";
+                document.getElementById('map-status').style.color = "#ff0000";
+                
+                alert("🚨 ERROR DETECTADO EN EL MODELO 3D:\n" + error.message + 
+                      "\n\nRevisa si el archivo está en la raíz de GitHub y pesa menos de 25MB.");
+            }
+        );
+
+        let miId = null;
+        let miArma = "Phantom";
+        const localPlayer = { x: 0, z: 0 };
+        const remotePlayers = {};
+
+        const keys = { w: false, a: false, s: false, d: false };
+        window.addEventListener('keydown', (e) => { 
+            if(keys[e.key.toLowerCase()] !== undefined) keys[e.key.toLowerCase()] = true;
+            if(e.key.toLowerCase() === 'q') {
+                miArma = (miArma === 'Phantom') ? 'Escopeta' : 'Phantom';
+                actualizarInterfazArma();
+                socket.emit('changeWeapon', miArma);
+            }
+        });
+        window.addEventListener('keyup', (e) => { if(keys[e.key.toLowerCase()] !== undefined) keys[e.key.toLowerCase()] = false; });
+
+        function actualizarInterfazArma() {
+            const txt = document.getElementById('weapon');
+            const cross = document.getElementById('crosshair');
+            txt.innerText = miArma;
+            if(miArma === 'Phantom') {
+                txt.style.color = "#00ffcc";
+                cross.className = "crosshair-phantom";
+            } else {
+                txt.style.color = "#ff5500";
+                cross.className = "crosshair-escopeta";
+            }
+        }
+
+        window.addEventListener('click', () => { socket.emit('shoot'); });
+
+        socket.on('initGame', (data) => {
+            miId = data.id;
+            miArma = data.allPlayers[miId].weapon;
+            actualizarInterfazArma();
+
+            Object.keys(data.allPlayers).forEach((id) => {
+                if (id !== miId && data.allPlayers[id].room === data.allPlayers[miId].room) {
+                    createRemotePlayer(id, data.allPlayers[id]);
+                }
+            });
+        });
+
+        socket.on('newPlayer', (data) => { createRemotePlayer(data.id, data.player); });
+
+        socket.on('playerMoved', (data) => {
+            if (remotePlayers[data.id]) {
+                remotePlayers[data.id].position.set(data.player.x, 1, data.player.z);
+            }
+        });
+
+        socket.on('enemyChangedWeapon', (data) => {
+            if (remotePlayers[data.id]) {
+                remotePlayers[data.id].material.color.setHex(data.weapon === 'Phantom' ? 0x00ffcc : 0xff5500);
+            }
+        });
+
+        socket.on('playerDisconnected', (id) => {
+            if (remotePlayers[id]) {
+                scene.remove(remotePlayers[id]);
+                delete remotePlayers[id];
+            }
+        });
+
+        function createRemotePlayer(id, playerData) {
+            if(remotePlayers[id]) return;
+            const geometry = new THREE.CapsuleGeometry(0.5, 1.5, 4, 8);
+            const color = playerData.weapon === 'Phantom' ? 0x00ffcc : 0xff5500;
+            const material = new THREE.MeshStandardMaterial({ color: color, roughness: 0.3 });
+            const mesh = new THREE.Mesh(geometry, material);
+            mesh.position.set(playerData.x, 1, playerData.z);
+            mesh.castShadow = true;
+            scene.add(mesh);
+            remotePlayers[id] = mesh;
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            let moved = false;
+            const speed = 0.12;
+            if (keys.w) { localPlayer.z -= speed; moved = true; }
+            if (keys.s) { localPlayer.z += speed; moved = true; }
+            if (keys.a) { localPlayer.x -= speed; moved = true; }
+            if (keys.d) { localPlayer.x += speed; moved = true; }
+
+            camera.position.set(localPlayer.x, 2, localPlayer.z + 5);
+            camera.lookAt(localPlayer.x, 1, localPlayer.z - 5);
+
+            if (moved && miId) {
+                socket.emit('playerMovement', { x: localPlayer.x, z: localPlayer.z, rotation: 0 });
+            }
+            renderer.render(scene, camera);
+        }
+        animate();
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+    </script>
+</body>
+</html>
