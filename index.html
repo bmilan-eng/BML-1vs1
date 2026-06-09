@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <title>1vs1 3D - Arena</title>
+    <style>
+        body, html { margin: 0; padding: 0; overflow: hidden; background: #0a0a12; color: white; font-family: sans-serif; }
+        
+        #lobby-screen { position: absolute; width: 100%; height: 100%; background: #0f0f1a; display: flex; flex-direction: column; align-items: center; justify-content: center; z-index: 100; }
+        .box { background: #161626; padding: 25px; border-radius: 10px; text-align: center; width: 320px; border: 1px solid #2d2d44; }
+        input, button { width: 90%; padding: 12px; margin: 8px 0; border-radius: 6px; font-size: 14px; }
+        input { background: #0a0a12; border: 1px solid #3b3b54; color: white; }
+        button { background: #00ffcc; cursor: pointer; font-weight: bold; border: none; color: #0a0a12; }
+        button:hover { background: #00ccaa; }
+        
+        #status-indicator { font-weight: bold; margin-bottom: 15px; padding: 5px 10px; border-radius: 4px; background: rgba(0,0,0,0.3); display: inline-block; }
+        ul { list-style: none; padding: 0; text-align: left; }
+        li { background: #222235; padding: 10px; margin: 6px 0; border-radius: 5px; display: flex; justify-content: space-between; align-items: center; }
+        .retar-btn { width: auto; padding: 5px 12px; margin: 0; background: #ffaa00; }
+
+        #click-to-play { display: none; position: absolute; width: 100%; height: 100%; background: rgba(0,0,0,0.85); z-index: 50; flex-direction: column; align-items: center; justify-content: center; cursor: pointer; text-align: center; }
+        #game-ui { display: none; position: absolute; top: 10px; left: 10px; z-index: 10; background: rgba(0,0,0,0.7); padding: 15px; border-radius: 6px; border: 1px solid #333; }
+        
+        #crosshair { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); pointer-events: none; display: none; z-index: 20; }
+        .crosshair-phantom { width: 6px; height: 6px; background: #00ffcc; border-radius: 50%; box-shadow: 0 0 5px #00ffcc; }
+        .crosshair-escopeta { width: 28px; height: 28px; border: 2px solid #ff5500; border-radius: 50%; }
+    </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/PointerLockControls.js"></script>
+    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+</head>
+<body>
+
+    <div id="lobby-screen">
+        <div class="box">
+            <h2>Lobby 1vs1 3D</h2>
+            <div id="status-indicator" style="color: #ffcc00;">🟡 Conectando a la nube...</div>
+            
+            <div id="ui-login">
+                <input type="text" id="username" placeholder="Tu Apodo...">
+                <button onclick="entrarAlLobby()">Buscar Partida</button>
+            </div>
+            
+            <div id="ui-lista" style="display:none;">
+                <p style="font-size:13px; color:#aaa;">Rivales activos:</p>
+                <ul id="player-list"></ul>
+            </div>
+        </div>
+    </div>
+
+    <div id="click-to-play">
+        <h1 style="color:#00ffcc;">¡PARTIDA LISTA!</h1>
+        <h2>HAZ CLICK AQUÍ PARA JUGAR</h2>
+        <p style="color:#aaa;">Mueve el ratón para girar la mira.<br>WASD para caminar. Q para cambiar de arma. Click para disparar.</p>
+    </div>
+
+    <div id="game-ui">
+        <p style="margin:0;">Arma: <b id="weapon-txt" style="color:#00ffcc;">Phantom</b></p>
+    </div>
+    <div id="crosshair" class="crosshair-phantom"></div>
+
+    <script>
+        // 🛠️ REEMPLAZA ESTE PARÉNTESIS CON TU LINK DE RENDER, EJ: io("https://juego.onrender.com")
+        const socket = io(); 
+
+        let miRoomId = null, miArma = "Phantom", juegoIniciado = false;
+
+        // Feedback del Servidor
+        const statusInd = document.getElementById('status-indicator');
+        socket.on('connect', () => {
+            statusInd.innerText = "🟢 Servidor Conectado";
+            statusInd.style.color = "#00ffcc";
+        });
+        socket.on('connect_error', () => {
+            statusInd.innerText = "🔴 Error: Servidor apagado o link incorrecto";
+            statusInd.style.color = "#ff3333";
+        });
+
+        // Configuración de Gráficos 3D
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x0a0a12);
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+
+        // Activación de Controles FPS (Ratón)
+        const controls = new THREE.PointerLockControls(camera, document.body);
+
+        scene.add(new THREE.AmbientLight(0xffffff, 0.9));
+        const light = new THREE.DirectionalLight(0xffffff, 1);
+        light.position.set(5, 25, 5);
+        scene.add(light);
+
+        // Cargar tu escenario 1v1camp.glb
+        const loader = new THREE.GLTFLoader();
+        loader.load('./1v1camp.glb', (gltf) => {
+            const map = gltf.scene;
+            map.scale.set(10, 10, 10); // Escalado intermedio estable
+            map.position.set(0, 0, 0);
+            scene.add(map);
+        });
+
+        // Mecánicas de movimiento
+        const move = { forward: false, backward: false, left: false, right: false };
+        const velocity = new THREE.Vector3();
+        const direction = new THREE.Vector3();
+
+        window.addEventListener('keydown', (e) => {
+            if(!controls.isLocked) return;
+            if(e.code === 'KeyW') move.forward = true;
+            if(e.code === 'KeyS') move.backward = true;
+            if(e.code === 'KeyA') move.left = true;
+            if(e.code === 'KeyD') move.right = true;
+            if(e.code === 'KeyQ') {
+                miArma = miArma === 'Phantom' ? 'Escopeta' : 'Phantom';
+                document.getElementById('weapon-txt').innerText = miArma;
+                document.getElementById('weapon-txt').style.color = miArma === 'Phantom' ? '#00ffcc' : '#ff5500';
+                document.getElementById('crosshair').className = miArma === 'Phantom' ? 'crosshair-phantom' : 'crosshair-escopeta';
+                socket.emit('changeWeapon', { roomId: miRoomId, weapon: miArma });
+            }
+        });
+
+        window.addEventListener('keyup', (e) => {
+            if(e.code === 'KeyW') move.forward = false;
+            if(e.code === 'KeyS') move.backward = false;
+            if(e.code === 'KeyA') move.left = false;
+            if(e.code === 'KeyD') move.right = false;
+        });
+
+        window.addEventListener('mousedown', () => {
+            if(controls.isLocked) socket.emit('shoot', { roomId: miRoomId, weapon: miArma });
+        });
+
+        // Gestión del Menú de Lobby
+        function entrarAlLobby() {
+            const name = document.getElementById('username').value;
+            if(!name) return alert("Escribe un nombre para continuar");
+            document.getElementById('ui-login').style.display = 'none';
+            document.getElementById('ui-lista').style.display = 'block';
+            socket.emit('joinLobby', name);
+        }
+
+        socket.on('updateLobbyList', (users) => {
+            const list = document.getElementById('player-list');
+            list.innerHTML = "";
+            
+            // Mostrar los demás jugadores
+            let otrosJugadores = users.filter(u => u.id !== socket.id);
+            
+            if(otrosJugadores.length === 0) {
+                list.innerHTML = "<p style='color:#777; font-size:13px;'>Esperando a que entre tu amigo... Dale tu link de Vercel.</p>";
+            } else {
+                otrosJugadores.forEach(u => {
+                    list.innerHTML += `<li><b>${u.name}</b> <button class="retar-btn" onclick="socket.emit('invitePlayer', '${u.id}')">RETAR</button></li>`;
+                });
+            }
+        });
+
+        socket.on('receiveInvite', (data) => {
+            if(confirm(`¡${data.fromName} te desafía a un 1vs1! ¿Aceptas el duelo?`)) {
+                socket.emit('acceptInvite', data.fromId);
+            }
+        });
+
+        // Comienzo del Match 3D
+        const remotePlayers = {};
+
+        socket.on('startGame', (data) => {
+            miRoomId = data.roomId;
+            document.getElementById('lobby-screen').style.display = 'none';
+            document.getElementById('click-to-play').style.display = 'flex';
+            document.body.appendChild(renderer.domElement);
+
+            const spawn = data.matchData[socket.id];
+            miArma = spawn.weapon;
+            document.getElementById('weapon-txt').innerText = miArma;
+            
+            // Spawn seguro en base a tu mapa
+            camera.position.set(spawn.x, 1.2, spawn.z);
+
+            Object.keys(data.matchData).forEach(id => {
+                if(id !== socket.id) crearRival(id, data.matchData[id]);
+            });
+
+            socket.emit('joinGameRoom', miRoomId);
+            juegoIniciado = true;
+            animate();
+        });
+
+        document.getElementById('click-to-play').addEventListener('click', () => { controls.lock(); });
+        controls.addEventListener('lock', () => {
+            document.getElementById('click-to-play').style.display = 'none';
+            document.getElementById('game-ui').style.display = 'block';
+            document.getElementById('crosshair').style.display = 'block';
+        });
+        controls.addEventListener('unlock', () => {
+            document.getElementById('click-to-play').style.display = 'flex';
+            document.getElementById('crosshair').style.display = 'none';
+        });
+
+        // Sincronización en batalla
+        socket.on('playerMoved', (data) => {
+            if(remotePlayers[data.id]) {
+                remotePlayers[data.id].position.set(data.x, 0.6, data.z);
+                remotePlayers[data.id].rotation.y = data.rotY;
+            }
+        });
+
+        socket.on('enemyChangedWeapon', (data) => {
+            if(remotePlayers[data.id]) remotePlayers[data.id].material.color.setHex(data.weapon === 'Phantom' ? 0x00ffcc : 0xff5500);
+        });
+
+        socket.on('enemyShot', (data) => { alert(`💥 ¡El rival te disparó con ${data.weapon}!`); });
+
+        function crearRival(id, data) {
+            const geo = new THREE.CapsuleGeometry(0.25, 0.7, 4, 8);
+            const mat = new THREE.MeshStandardMaterial({ color: data.weapon === 'Phantom' ? 0x00ffcc : 0xff5500 });
+            const mesh = new THREE.Mesh(geo, mat);
+            mesh.position.set(data.x, 0.6, data.z);
+            scene.add(mesh);
+            remotePlayers[id] = mesh;
+        }
+
+        // Bucle de renders y límites invisibles
+        let prevTime = performance.now();
+        function animate() {
+            if(!juegoIniciado) return;
+            requestAnimationFrame(animate);
+
+            const time = performance.now();
+            const delta = (time - prevTime) / 1000;
+
+            if (controls.isLocked) {
+                velocity.x -= velocity.x * 10.0 * delta;
+                velocity.z -= velocity.z * 10.0 * delta;
+
+                direction.z = Number(move.forward) - Number(move.backward);
+                direction.x = Number(move.right) - Number(move.left);
+                direction.normalize();
+
+                const speed = 35.0;
+                if (move.forward || move.backward) velocity.z -= direction.z * speed * delta;
+                if (move.left || move.right) velocity.x -= direction.x * speed * delta;
+
+                controls.moveRight(-velocity.x * delta);
+                controls.moveForward(-velocity.z * delta);
+
+                // 🛑 LÍMITES FÍSICOS SEGUROS DE ARENA (Cuadrante de 12 metros alrededor del spawn)
+                if (camera.position.x > 12) camera.position.x = 12;
+                if (camera.position.x < -12) camera.position.x = -12;
+                if (camera.position.z > 12) camera.position.z = 12;
+                if (camera.position.z < -12) camera.position.z = -12;
+                camera.position.y = 1.2; // Altura del personaje
+
+                // Transmitir posición y rotación de la mira al oponente
+                socket.emit('playerMovement', { 
+                    roomId: miRoomId, 
+                    x: camera.position.x, 
+                    z: camera.position.z, 
+                    rotY: camera.rotation.y 
+                });
+            }
+
+            renderer.render(scene, camera);
+            prevTime = time;
+        }
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+    </script>
+</body>
+</html>
